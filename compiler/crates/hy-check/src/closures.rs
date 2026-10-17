@@ -123,14 +123,9 @@ fn check_one_closure(
     for (nparams, nresults, nbody, mut saved_scopes, saved_aliases, saved_share) in nested {
         if !saved_scopes.is_empty() && !cst.scopes.is_empty() {
             for (k, b) in &cst.scopes[0] {
-                match saved_scopes[0].get_mut(k) {
-                    Some(sb) => {
-                        if sb.moved.is_none() && b.moved.is_some() {
-                            sb.moved = b.moved.clone();
-                        }
-                    }
-                    None => {
-                        saved_scopes[0].insert(k.clone(), b.clone());
+                if let Some(sb) = saved_scopes[0].get_mut(k) {
+                    if sb.moved.is_none() && b.moved.is_some() {
+                        sb.moved = b.moved.clone();
                     }
                 }
             }
@@ -149,9 +144,70 @@ fn check_one_closure(
         for (k, vs) in saved_share {
             snap.may_share.entry(k).or_default().extend(vs);
         }
+
+        // Propagate any moves across snap's aliases and may-share peers (#449)
+        let mut moved_info: Vec<(String, crate::model::MoveInfo)> = Vec::new();
+        for (k, b) in &snap.env {
+            if let Some(mv) = &b.moved {
+                moved_info.push((k.clone(), mv.clone()));
+            }
+        }
+        for scope in &snap.scopes {
+            for (k, b) in scope {
+                if let Some(mv) = &b.moved {
+                    moved_info.push((k.clone(), mv.clone()));
+                }
+            }
+        }
+        for (name, mv) in moved_info {
+            let root = crate::freeze::resolve_alias(&snap, &name);
+            let mut members: Vec<String> = vec![name.clone(), root.clone()];
+            for a in snap.aliases.keys() {
+                if crate::freeze::resolve_alias(&snap, a) == root {
+                    members.push(a.clone());
+                }
+            }
+            let seeded = members.clone();
+            for m in seeded {
+                members.extend(snap.share_group(&m));
+            }
+            members.sort();
+            members.dedup();
+            for m in members {
+                if let Some(b) = snap.env_lookup_mut(&m) {
+                    if b.moved.is_none() {
+                        b.moved = Some(mv.clone());
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(format!("a may-share peer of {}", name));
+                        }
+                    }
+                }
+            }
+        }
+
         check_one_closure(ck, &snap, nparams, nresults, nbody);
     }
     cst.scope_pop();
+}
+
+fn pop_scope_and_sync(st: &mut FnState, nested: &mut [NestedClosure<'_>]) {
+    let depth = st.scopes.len().saturating_sub(1);
+    if let Some(curr_scope) = st.scopes.last() {
+        for (k, b) in curr_scope {
+            if b.moved.is_some() {
+                for (_, _, _, saved_scopes, _, _) in nested.iter_mut() {
+                    if depth < saved_scopes.len() {
+                        if let Some(sb) = saved_scopes[depth].get_mut(k) {
+                            if sb.moved.is_none() {
+                                sb.moved = b.moved.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    st.scope_pop();
 }
 
 /// Walk one closure body recursively, checking boundary statements only.
@@ -166,10 +222,8 @@ fn check_body_boundaries<'a>(
     nested: &mut Vec<NestedClosure<'a>>,
 ) {
     for stmt in &block.stmts {
-        check_stmt_boundaries(ck, st, stmt, managed, nested);
-    }
-    for stmt in &block.stmts {
         collect_stmt_direct_fnlits(stmt, st, nested);
+        check_stmt_boundaries(ck, st, stmt, managed, nested);
     }
 }
 
@@ -531,14 +585,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     SelectArmKind::Default => {}
                 }
                 check_body_boundaries(ck, st, &arm.body, managed, nested);
-                st.scope_pop();
+                pop_scope_and_sync(st, nested);
             }
         }
         Stmt::Managed { body, .. } => {
             ck.managed_blocks += 1; // O6.3 parity with the flat walk
             st.scope_push();
             check_body_boundaries(ck, st, body, true, nested);
-            st.scope_pop();
+            pop_scope_and_sync(st, nested);
         }
         Stmt::If {
             init,
@@ -551,8 +605,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             // construct, Go rule); the then/else bodies open their own.
             st.scope_push();
             if let Some(i) = init {
-                check_stmt_boundaries(ck, st, i, managed, nested);
                 collect_stmt_direct_fnlits(i, st, nested);
+                check_stmt_boundaries(ck, st, i, managed, nested);
             }
             check_stmt_own_uses(ck, st, stmt, managed);
             ck.mark_move_in_value(
@@ -562,14 +616,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             );
             st.scope_push();
             check_body_boundaries(ck, st, then, managed, nested);
-            st.scope_pop();
+            pop_scope_and_sync(st, nested);
             if let Some(o) = otherwise {
-                check_stmt_boundaries(ck, st, o, managed, nested);
                 if !matches!(o.as_ref(), Stmt::Block { .. } | Stmt::If { .. }) {
                     collect_stmt_direct_fnlits(o, st, nested);
                 }
+                check_stmt_boundaries(ck, st, o, managed, nested);
             }
-            st.scope_pop();
+            pop_scope_and_sync(st, nested);
         }
         Stmt::For { kind, body, .. } => {
             let outer_depth = st.scopes.len();
@@ -660,8 +714,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     &mut reported_backedge,
                 );
             }
-            st.scope_pop();
-            st.scope_pop();
+            pop_scope_and_sync(st, nested);
+            pop_scope_and_sync(st, nested);
         }
         Stmt::Match {
             subject,
@@ -693,13 +747,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ck.bind_match_arm(st, name, subject, managed);
                 }
                 check_body_boundaries(ck, st, &arm.body, managed, nested);
-                st.scope_pop();
+                pop_scope_and_sync(st, nested);
             }
         }
         Stmt::Block { block, .. } => {
             st.scope_push();
             check_body_boundaries(ck, st, block, managed, nested);
-            st.scope_pop();
+            pop_scope_and_sync(st, nested);
         }
         Stmt::Assign {
             targets,
