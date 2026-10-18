@@ -803,6 +803,26 @@ fn generic_fn_and_struct_type_params() {
 }
 
 #[test]
+fn test_issue_722_generic_struct_without_explicit_constraint() {
+    let go = emit(
+        "struct box[t] {\n    v t\n}\n\nfn main() {\n    var b box[int] = box[int]{ v: 3 }\n    fmt.println(b.v)\n}\n",
+    );
+    assert!(go.contains("type box[t any] struct {"), ":\n{}", go);
+    assert!(go.contains("var b box[int] = box[int]{v: 3}"), ":\n{}", go);
+}
+
+#[test]
+fn test_issue_722_generic_struct_with_map_field() {
+    let go = emit(
+        "struct container[t] {\n    items map[string]t\n}\n\nfn main() {\n    var c container[int]\n    c2 := container[int]{}\n    fmt.println(len(c.items) + len(c2.items))\n}\n",
+    );
+    assert!(go.contains("type container[t any] struct {"), ":\n{}", go);
+    assert!(go.contains("items map[string]t"), ":\n{}", go);
+    assert!(go.contains("var c container[int]"), ":\n{}", go);
+    assert!(go.contains("c2 := container[int]{}"), ":\n{}", go);
+}
+
+#[test]
 fn assoc_fn_call_mangles_dotted_name() {
     let go = emit(
         "struct box[t any] {\n    v t\n}\n\nfn box.new[t any](v t) box[t] {\n    return box[t]{v: v}\n}\n\nfn main() {\n    b := box.new[int](3)\n}\n",
