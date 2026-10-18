@@ -67,6 +67,9 @@ struct NestedClosure<'a> {
     saved_scopes: Vec<std::collections::HashMap<String, Binding>>,
     saved_aliases: std::collections::HashMap<String, String>,
     saved_share: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_closure_mutates: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_closure_fnlits: std::collections::HashMap<String, crate::model::ClosureFnLitEntry>,
+    saved_closure_defs: std::collections::HashMap<String, crate::model::ClosureDefEntry>,
     overwritten: std::collections::HashSet<(usize, String)>,
 }
 
@@ -84,6 +87,9 @@ fn push_nested_closure<'a>(
         saved_scopes: st.scopes.clone(),
         saved_aliases: st.aliases.clone(),
         saved_share: st.may_share.clone(),
+        saved_closure_mutates: st.closure_mutates.clone(),
+        saved_closure_fnlits: st.closure_fnlits.clone(),
+        saved_closure_defs: st.closure_defs.clone(),
         overwritten: std::collections::HashSet::new(),
     });
 }
@@ -136,6 +142,32 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
                         nc.saved_share.entry(v.clone()).or_default().insert(k.clone());
                     }
                 }
+            }
+        }
+        for (k, vs) in &st.closure_mutates {
+            if !is_overwritten_in_nc(st, nc, k) {
+                nc.saved_closure_mutates
+                    .entry(k.clone())
+                    .or_default()
+                    .extend(vs.iter().cloned());
+            }
+        }
+        for (k, fnlit) in &st.closure_fnlits {
+            if !is_overwritten_in_nc(st, nc, k) {
+                let merged = match nc.saved_closure_fnlits.get(k) {
+                    Some(prev) => crate::model::merge_closure_fnlit(prev, fnlit),
+                    None => fnlit.clone(),
+                };
+                nc.saved_closure_fnlits.insert(k.clone(), merged);
+            }
+        }
+        for (k, def) in &st.closure_defs {
+            if !is_overwritten_in_nc(st, nc, k) {
+                let merged = match nc.saved_closure_defs.get(k) {
+                    Some(prev) => crate::model::merge_closure_def(prev, def),
+                    None => def.clone(),
+                };
+                nc.saved_closure_defs.insert(k.clone(), merged);
             }
         }
         let mut active_moves: Vec<(String, crate::model::MoveInfo)> = Vec::new();
@@ -210,10 +242,36 @@ fn check_one_closure(
             env.insert(k.clone(), v.clone());
         }
     }
+    let mut closure_mutates = st.block_closure_mutates.clone();
+    for (k, vs) in &st.closure_mutates {
+        closure_mutates
+            .entry(k.clone())
+            .or_default()
+            .extend(vs.iter().cloned());
+    }
+    let mut closure_fnlits = st.block_closure_fnlits.clone();
+    for (k, fnlit) in &st.closure_fnlits {
+        let merged = match closure_fnlits.get(k) {
+            Some(prev) => crate::model::merge_closure_fnlit(prev, fnlit),
+            None => fnlit.clone(),
+        };
+        closure_fnlits.insert(k.clone(), merged);
+    }
+    let mut closure_defs = st.block_closure_defs.clone();
+    for (k, def) in &st.closure_defs {
+        let merged = match closure_defs.get(k) {
+            Some(prev) => crate::model::merge_closure_def(prev, def),
+            None => def.clone(),
+        };
+        closure_defs.insert(k.clone(), merged);
+    }
     let mut cst = FnState {
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        closure_mutates,
+        closure_fnlits,
+        closure_defs,
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {
@@ -226,6 +284,9 @@ fn check_one_closure(
     }
     for p in params {
         let shape = ck.shape_of_type(&p.ty);
+        cst.closure_mutates.remove(&p.name);
+        cst.closure_fnlits.remove(&p.name);
+        cst.closure_defs.remove(&p.name);
         cst.env.insert(
             p.name.clone(),
             Binding {
@@ -246,6 +307,9 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                cst.closure_mutates.remove(name);
+                cst.closure_fnlits.remove(name);
+                cst.closure_defs.remove(name);
                 cst.env.insert(
                     name.clone(),
                     Binding {
@@ -271,6 +335,9 @@ fn check_one_closure(
     for nc in nested {
         let mut snap = cst.clone();
         snap.scopes = nc.saved_scopes;
+        snap.closure_mutates = nc.saved_closure_mutates;
+        snap.closure_fnlits = nc.saved_closure_fnlits;
+        snap.closure_defs = nc.saved_closure_defs;
         // A nested closure checks against ITS OWN named results: reset the
         // enclosing closure's seeded state, check_one_closure re-seeds from
         // nresults (a bare return inside the nested closure must not record
@@ -525,7 +592,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ck.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
                 }
             } else if l.names.len() == l.values.len() {
-                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                let precomputed_closures: Vec<_> = l
+                    .names
+                    .iter()
+                    .zip(l.values.iter())
+                    .map(|(name, value)| ck.compute_closure_mutations(st, name, value, 0, 0))
+                    .collect();
+                for ((name, value), (c_mutates, c_fnlit, c_def)) in l
+                    .names
+                    .iter()
+                    .zip(l.values.iter())
+                    .zip(precomputed_closures)
+                {
                     let moved_non_owned = crate::model::move_operand_ident(value)
                         .and_then(|src| ck.lookup_binding(st, &src))
                         .and_then(|b| b.non_owned_origin.clone())
@@ -551,6 +629,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             }
                         }
                         ck.record_move_const_and_a3_loans(st, name, value, 0);
+                        Checker::apply_closure_mutations(st, name, c_mutates, c_fnlit, c_def);
+                        ck.record_container_closure_mutations(st, name, value, 0);
                         continue;
                     }
                     let reads_self = ck.value_reads_storage_of(st, value, name);
@@ -650,7 +730,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ck.record_may_share(st, name, value);
                     ck.record_move_const_and_a3_loans(st, name, value, 0);
                     ck.record_alias(st, name, value);
-                    ck.record_closure_mutations(st, name, value);
+                    Checker::apply_closure_mutations(st, name, c_mutates, c_fnlit, c_def);
+                    ck.record_container_closure_mutations(st, name, value, 0);
                     if let Some(origin) = shadowed_origin.or(moved_non_owned) {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -678,6 +759,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 };
                 let val_opt = l.values.first();
                 let resolved: Vec<(
+                    usize,
                     String,
                     TypeShape,
                     Option<hy_syntax::TypeExpr>,
@@ -690,7 +772,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     .iter()
                     .zip(shapes)
                     .zip(tys)
-                    .map(|((name, shape), ty)| {
+                    .enumerate()
+                    .map(|(pos, ((name, shape), ty))| {
                         let reads_self = val_opt
                             .map(|v| ck.value_reads_storage_of(st, v, name))
                             .unwrap_or(false);
@@ -729,6 +812,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             Vec::new()
                         };
                         (
+                            pos,
                             name.clone(),
                             shape,
                             ty,
@@ -740,6 +824,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     })
                     .collect();
                 for (
+                    pos,
                     name,
                     shape,
                     ty,
@@ -762,6 +847,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                     if let Some(v) = val_opt {
                         ck.record_multi_value_share_and_alias(st, &name, &shape, v);
+                        ck.record_closure_mutations_at(st, &name, v, pos);
                     }
                     if let Some(origin) = shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(&name) {
