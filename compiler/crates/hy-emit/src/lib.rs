@@ -413,6 +413,8 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// var → map type text (`map[string]int`): `var m map[string]int`.
+    var_map_types: BTreeMap<String, String>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
     /// Local/parameter/receiver/result names bound in the current function frame.
@@ -426,6 +428,7 @@ pub(crate) struct ScopeSnapshot {
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
+    var_map_types: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
 }
 
@@ -459,6 +462,7 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            var_map_types: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
@@ -476,6 +480,7 @@ impl Emitter {
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
+            var_map_types: self.var_map_types.clone(),
             pointer_vars: self.pointer_vars.clone(),
         }
     }
@@ -485,6 +490,7 @@ impl Emitter {
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
+        self.var_map_types = saved.var_map_types;
         self.pointer_vars = saved.pointer_vars;
     }
 
@@ -494,6 +500,7 @@ impl Emitter {
             self.bindings.remove(name);
             self.var_ty.remove(name);
             self.var_struct.remove(name);
+            self.var_map_types.remove(name);
             self.pointer_vars.remove(name);
         }
     }
@@ -549,7 +556,13 @@ impl Emitter {
                     s.name.clone(),
                     s.fields
                         .iter()
-                        .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
+                        .map(|f| {
+                            let ty_str = match &f.ty {
+                                TypeExpr::Map { .. } => self.type_text(&f.ty),
+                                t => base_ty_name(t).unwrap_or_default(),
+                            };
+                            (f.name.clone(), ty_str)
+                        })
                         .collect::<Vec<_>>(),
                 )),
                 _ => None,
@@ -775,6 +788,7 @@ impl Emitter {
         self.bindings.clear();
         self.var_struct.clear();
         self.var_ty.clear();
+        self.var_map_types.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
         self.temp_n = 0;
@@ -1042,6 +1056,10 @@ impl Emitter {
             }
             if matches!(p.ty, TypeExpr::Pointer { .. }) {
                 self.pointer_vars.insert(p.name.clone());
+            }
+            if matches!(p.ty, TypeExpr::Map { .. }) {
+                let ty_str = self.type_text(&p.ty);
+                self.var_map_types.insert(p.name.clone(), ty_str);
             }
             self.register_var_ty(&p.name, &p.ty);
         }

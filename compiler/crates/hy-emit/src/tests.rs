@@ -2529,3 +2529,21 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn test_n5_zero_map_auto_allocate() {
+    let go = emit(
+        "struct bag {\n    counts map[string]int\n}\n\nfn main() {\n    var m map[string]int\n    m[\"a\"] = 1\n    fmt.println(len(m))\n\n    var b bag\n    b.counts[\"k\"] = 2\n    fmt.println(len(b.counts))\n}\n",
+    );
+    assert!(
+        go.contains("if m == nil {\n\t\tm = make(map[string]int)\n\t}"),
+        "local zero map auto-alloc guard:\n{}",
+        go
+    );
+    assert!(
+        go.contains("if b.counts == nil {\n\t\tb.counts = make(map[string]int)\n\t}"),
+        "struct field zero map auto-alloc guard:\n{}",
+        go
+    );
+}
+

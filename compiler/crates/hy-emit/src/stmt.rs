@@ -301,6 +301,14 @@ impl Emitter {
                             }
                         }
                     }
+                    if matches!(t, TypeExpr::Map { .. }) {
+                        let ty_str = self.type_text(t);
+                        for n in &l.names {
+                            if n != "_" {
+                                self.var_map_types.insert(n.clone(), ty_str.clone());
+                            }
+                        }
+                    }
                     if let Some(kind) = self.binding_kind_of_ty(t) {
                         for n in &l.names {
                             if n != "_" {
@@ -1026,6 +1034,15 @@ impl Emitter {
                 self.register_var_ty(&names[0], t);
             }
         }
+        for (n, v) in names.iter().zip(values.iter()) {
+            if n != "_" {
+                let peeled = Self::peel_parens(v);
+                if let Expr::MapLit { key, value, .. } = peeled {
+                    let map_ty = format!("map[{}]{}", self.type_text(key), self.type_text(value));
+                    self.var_map_types.insert(n.clone(), map_ty);
+                }
+            }
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
@@ -1103,6 +1120,43 @@ impl Emitter {
                 self.binding_kind_of(e) == BindingKind::Chan
             }
             _ => false,
+        }
+    }
+
+    fn struct_type_of_place(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(name) => self.var_struct.get(name).cloned(),
+            PlaceKind::Field { base, name } => {
+                let parent_struct = self.struct_type_of_place(base)?;
+                let fields = self.struct_fields.get(&parent_struct)?;
+                let (_, fty) = fields.iter().find(|(f, _)| f == name)?;
+                if self.struct_fields.contains_key(fty) {
+                    Some(fty.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves the declared map type of a place (e.g. `m` -> `map[string]int`,
+    /// `b.counts` -> `map[string]int`) so that N5 map auto-allocation guards
+    /// can be emitted on map store sites.
+    fn map_type_of_place(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(name) => self.var_map_types.get(name).cloned(),
+            PlaceKind::Field { base, name } => {
+                let struct_name = self.struct_type_of_place(base)?;
+                let fields = self.struct_fields.get(&struct_name)?;
+                let (_, fty) = fields.iter().find(|(f, _)| f == name)?;
+                if fty.starts_with("map[") {
+                    Some(fty.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1226,11 +1280,31 @@ impl Emitter {
             AssignOp::ShlAssign => "<<=",
             AssignOp::ShrAssign => ">>=",
             AssignOp::Inc => {
+                if let PlaceKind::Index { base, .. } = &targets[0].kind {
+                    if let Some(map_ty) = self.map_type_of_place(base) {
+                        let base_text = self.emit_place(base)?;
+                        self.push(&format!("if {} == nil {{", base_text));
+                        self.indent += 1;
+                        self.push(&format!("{} = make({})", base_text, map_ty));
+                        self.indent -= 1;
+                        self.push("}");
+                    }
+                }
                 let t = self.emit_place(&targets[0])?;
                 self.push(&format!("{}++", t));
                 return Ok(());
             }
             AssignOp::Dec => {
+                if let PlaceKind::Index { base, .. } = &targets[0].kind {
+                    if let Some(map_ty) = self.map_type_of_place(base) {
+                        let base_text = self.emit_place(base)?;
+                        self.push(&format!("if {} == nil {{", base_text));
+                        self.indent += 1;
+                        self.push(&format!("{} = make({})", base_text, map_ty));
+                        self.indent -= 1;
+                        self.push("}");
+                    }
+                }
                 let t = self.emit_place(&targets[0])?;
                 self.push(&format!("{}--", t));
                 return Ok(());
@@ -1243,6 +1317,18 @@ impl Emitter {
                 self.hoist_order_before_try(v)?;
             } else {
                 self.hoist_tries_expr(v)?;
+            }
+        }
+        if targets.len() == 1 {
+            if let PlaceKind::Index { base, .. } = &targets[0].kind {
+                if let Some(map_ty) = self.map_type_of_place(base) {
+                    let base_text = self.emit_place(base)?;
+                    self.push(&format!("if {} == nil {{", base_text));
+                    self.indent += 1;
+                    self.push(&format!("{} = make({})", base_text, map_ty));
+                    self.indent -= 1;
+                    self.push("}");
+                }
             }
         }
         let ts = targets
