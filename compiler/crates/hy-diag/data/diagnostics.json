@@ -485,6 +485,22 @@
       "rule": "N"
     },
     {
+      "code": "HYB-E4003",
+      "name": "untyped-nil-declaration",
+      "category": "nil-safety",
+      "severity": "error",
+      "title": "use of untyped nil in variable declaration",
+      "summary": "Declaring a variable initialized to bare `nil` without a declared type (`var x = nil`, `x := nil`, `let x = nil`) emits Go that fails `go build` with `use of untyped nil in variable declaration`. In Hybrid, nil exists only for `error` and foreign Go APIs (N1). Provide an explicit type (`var e error = nil`), declare without an initializer for the zero value (N3), or use `option[T]`.",
+      "fixits": [
+        "ascribe an explicit type: `var e error = nil`",
+        "declare without an initializer for the zero value: `var ch chan int` or `var s []int`",
+        "use `option[T]` if absence is intended: `var x option[int] = none`"
+      ],
+      "example": "x := nil   // reject: HYB-E4003 — use of untyped nil in variable declaration",
+      "rule": "N",
+      "tier0_rule_id": "N1"
+    },
+    {
       "code": "HYB-E5001",
       "name": "match-not-exhaustive",
       "category": "match",

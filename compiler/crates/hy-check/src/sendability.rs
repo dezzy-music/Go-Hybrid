@@ -907,6 +907,25 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    /// N1/BUILDABLE: bare `nil` initializer at an untyped local declaration
+    /// (`var x = nil`, `x := nil`, `let x = nil`) emits Go that fails `go build`
+    /// (`use of untyped nil in variable declaration`, issue #672).
+    pub(crate) fn emit_untyped_nil_error(&mut self, name: &str, span: Span) {
+        let msg = format!(
+            "use of untyped nil in declaration of `{}`: nil requires an explicit type (HYB-E4003)",
+            name
+        );
+        let notes = vec![
+            "why: Go rejects variable declarations initialized with bare `nil` without a type (`use of untyped nil in variable declaration`), so an accepted Hybrid program would emit unbuildable Go (BUILDABLE / N1, issue #672)".to_string(),
+            "why: nil exists only for `error` and foreign Go values (N1); every Hybrid-declared type has a zero value instead (N3)".to_string(),
+            "fix: ascribe an explicit type: `var e error = nil`".to_string(),
+            "fix: declare without an initializer for the zero value: `var ch chan int` or `var s []int`".to_string(),
+            "fix: if absence is intended, use `option[T]`: `var x option[int] = none`".to_string(),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E4003", self.path.clone(), span, msg).with_notes(notes));
+    }
+
     /// N1 for composite literals: `job{m: nil}` with a map-typed field used
     /// to pass the checker — classify_composite has no per-field type
     /// context, so the bare-nil check at the five direct-flow sites never

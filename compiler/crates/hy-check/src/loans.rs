@@ -1553,6 +1553,9 @@ impl<'a> Checker<'a> {
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own
                 // example is `var s []int = nil`.
+                // N1/BUILDABLE: an untyped local declaration initialized with bare
+                // `nil` (`var x = nil`, `x := nil`, `let x = nil`) emits Go that
+                // fails `go build` (`use of untyped nil in variable declaration`, issue #672).
                 if let Some(t) = &l.ty {
                     if Checker::is_nil_literal(value) {
                         let shape = self.shape_of_type(t);
@@ -1567,6 +1570,8 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                } else if l.kind != LocalKind::Const && Checker::is_nil_literal(value) {
+                    self.emit_untyped_nil_error(name, value.span());
                 }
                 // N1 for composite literals: `job{m: nil}` carries its own
                 // type context (the struct def / map value / slice elem) —

@@ -487,6 +487,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         );
                     }
                 }
+            } else if l.kind != LocalKind::Const {
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if Checker::is_nil_literal(value) {
+                        ck.emit_untyped_nil_error(name, value.span());
+                    }
+                }
             }
             for v in &l.values {
                 ck.check_composite_nils(st, v);
