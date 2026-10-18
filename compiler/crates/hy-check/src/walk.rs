@@ -482,7 +482,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 expr_uses(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
             for i in items {
                 expr_uses(i, out);
             }
@@ -703,7 +703,7 @@ pub(crate) fn expr_fnlits<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
                 expr_fnlits(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
             for i in items {
                 expr_fnlits(i, out);
             }
@@ -767,7 +767,7 @@ pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
                 expr_calls(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
             for i in items {
                 expr_calls(i, out);
             }

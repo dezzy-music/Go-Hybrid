@@ -467,7 +467,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_type_conversions(&f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for i in items {
                     self.check_expr_type_conversions(i);
                 }

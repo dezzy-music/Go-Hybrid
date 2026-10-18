@@ -99,6 +99,13 @@ pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
             elem.as_ref().is_some_and(|t| ty_reads(t, target))
                 || items.iter().any(|v| expr_reads(v, target))
         }
+        Expr::ArrayLit {
+            len, elem, items, ..
+        } => {
+            len.as_ref().is_some_and(|l| expr_reads(l, target))
+                || ty_reads(elem, target)
+                || items.iter().any(|v| expr_reads(v, target))
+        }
         Expr::MapLit {
             key,
             value,

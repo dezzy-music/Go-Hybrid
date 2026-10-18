@@ -1610,7 +1610,7 @@ impl<'a> Checker<'a> {
                     self.walk_expr_chan_dir(&f.value, env);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for i in items {
                     self.walk_expr_chan_dir(i, env);
                 }

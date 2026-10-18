@@ -2316,7 +2316,7 @@ impl<'a> Checker<'a> {
             Expr::StructLit { fields, .. } => fields
                 .iter()
                 .any(|f| self.expr_slices_addressable_array(st, &f.value, root)),
-            Expr::SliceLit { items, .. } => items
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => items
                 .iter()
                 .any(|it| self.expr_slices_addressable_array(st, it, root)),
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
@@ -7249,7 +7249,7 @@ fn collect_capture_idents_expr(
                 collect_capture_idents_expr(&f.value, bound, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
             for i in items {
                 collect_capture_idents_expr(i, bound, out);
             }

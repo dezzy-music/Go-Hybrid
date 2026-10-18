@@ -221,7 +221,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_const_zero_divisor(&f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for i in items {
                     self.check_expr_const_zero_divisor(i);
                 }

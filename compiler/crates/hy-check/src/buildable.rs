@@ -763,6 +763,20 @@ impl<'a> Collector<'a> {
                     self.expr(i);
                 }
             }
+            Expr::ArrayLit {
+                len,
+                elem,
+                items,
+                ..
+            } => {
+                if let Some(l) = len {
+                    self.expr(l);
+                }
+                self.ty(elem);
+                for i in items {
+                    self.expr(i);
+                }
+            }
             Expr::MapLit {
                 key,
                 value,
@@ -1079,6 +1093,10 @@ impl<'a> Collector<'a> {
                     .unwrap_or(OpKind::Unknown);
                 OpKind::Slice(Box::new(ek))
             }
+            Expr::ArrayLit { elem, .. } => {
+                let ek = self.kind_of_ty(elem, 0);
+                OpKind::Array(Box::new(ek))
+            }
             Expr::MapLit { key, value, .. } => OpKind::Map(
                 Box::new(self.kind_of_ty(key, 0)),
                 Box::new(self.kind_of_ty(value, 0)),
@@ -1110,6 +1128,11 @@ impl<'a> Collector<'a> {
                 items,
                 ..
             } if items.is_empty() => Some(vec![OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))]),
+            Expr::ArrayLit {
+                elem,
+                items,
+                ..
+            } if items.is_empty() => Some(vec![OpKind::Array(Box::new(self.kind_of_ty(elem, 0)))]),
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     if let OpKind::Fn(res) = k {

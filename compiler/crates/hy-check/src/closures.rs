@@ -1481,7 +1481,7 @@ fn collect_expr<'a>(
                 collect_expr(&f.value, out);
             }
         }
-        Expr::SliceLit { items, .. } => {
+        Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
             for i in items {
                 collect_expr(i, out);
             }

@@ -215,7 +215,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_builtin_args(&f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for it in items {
                     self.check_expr_builtin_args(it);
                 }

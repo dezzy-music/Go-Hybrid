@@ -471,7 +471,9 @@ impl Emitter {
             Expr::StructLit { fields, .. } => fields
                 .iter()
                 .any(|f| Self::expr_has_hoistable_try(&f.value)),
-            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_hoistable_try),
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
+                items.iter().any(Self::expr_has_hoistable_try)
+            }
             Expr::MapLit { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| Self::expr_has_hoistable_try(k) || Self::expr_has_hoistable_try(v)),
@@ -537,7 +539,9 @@ impl Emitter {
             Expr::StructLit { fields, .. } => {
                 fields.iter().any(|f| Self::expr_has_call_or_recv(&f.value))
             }
-            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_call_or_recv),
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
+                items.iter().any(Self::expr_has_call_or_recv)
+            }
             Expr::MapLit { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| Self::expr_has_call_or_recv(k) || Self::expr_has_call_or_recv(v)),
@@ -711,7 +715,7 @@ impl Emitter {
                     }
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for (idx, i) in items.iter().enumerate() {
                     let later_has_try = items[idx + 1..].iter().any(Self::expr_has_hoistable_try);
                     if later_has_try {
@@ -2824,7 +2828,7 @@ impl Emitter {
             Expr::StructLit { fields, .. } => fields
                 .iter()
                 .any(|f| Self::expr_mentions_ident(&f.value, target)),
-            Expr::SliceLit { items, .. } => items
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => items
                 .iter()
                 .any(|x| Self::expr_mentions_ident(x, target)),
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {

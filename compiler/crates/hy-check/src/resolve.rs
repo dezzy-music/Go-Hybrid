@@ -344,6 +344,20 @@ impl<'a> Scan<'a> {
                     self.run_expr(i);
                 }
             }
+            Expr::ArrayLit {
+                len,
+                elem,
+                items,
+                ..
+            } => {
+                if let Some(l) = len {
+                    self.run_expr(l);
+                }
+                self.run_type(elem);
+                for i in items {
+                    self.run_expr(i);
+                }
+            }
             Expr::MapLit {
                 key,
                 value,

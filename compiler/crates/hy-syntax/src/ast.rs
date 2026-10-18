@@ -572,6 +572,13 @@ pub enum Expr {
         items: Vec<Expr>,
         span: Span,
     },
+    /// `[3]int{1, 2, 3}`, `[...]int{1, 2}`, `[3]int{}` (array composite literal)
+    ArrayLit {
+        len: Option<Box<Expr>>,
+        elem: Box<TypeExpr>,
+        items: Vec<Expr>,
+        span: Span,
+    },
     /// `map[string]int{}` / `map[string]service{"frontend": {...}, ...}`
     MapLit {
         key: Box<TypeExpr>,
@@ -746,6 +753,7 @@ impl Expr {
             | Expr::Call { span, .. }
             | Expr::StructLit { span, .. }
             | Expr::SliceLit { span, .. }
+            | Expr::ArrayLit { span, .. }
             | Expr::MapLit { span, .. }
             | Expr::FnLit { span, .. }
             | Expr::Paren { span, .. } => *span,
@@ -800,6 +808,10 @@ impl Expr {
                 None => "{...}".to_string(),
             },
             Expr::SliceLit { .. } => "[...]".to_string(),
+            Expr::ArrayLit { len, elem, .. } => match len {
+                Some(l) => format!("[{}]{}{{...}}", l.render(), elem.render()),
+                None => format!("[...]{}{{...}}", elem.render()),
+            },
             Expr::MapLit { key, value, .. } => {
                 format!("map[{}]{}{{...}}", key.render(), value.render())
             }

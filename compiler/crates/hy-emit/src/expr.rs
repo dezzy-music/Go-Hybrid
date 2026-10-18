@@ -224,6 +224,24 @@ impl Emitter {
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
 
+            Expr::ArrayLit {
+                len,
+                elem,
+                items,
+                ..
+            } => {
+                let len_str = match len {
+                    Some(e) => self.expr_text_static(e),
+                    None => "...".to_string(),
+                };
+                let head = format!("[{}]{}", len_str, self.type_text(elem));
+                let mut parts = Vec::new();
+                for i in items {
+                    parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                }
+                Ok(format!("{}{{{}}}", head, parts.join(", ")))
+            }
+
             Expr::MapLit {
                 key,
                 value,
@@ -726,6 +744,30 @@ impl Emitter {
                 ));
             }
         }
+        if let Expr::ArrayLit {
+            len,
+            elem,
+            items,
+            ..
+        } = callee
+        {
+            if items.is_empty() {
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                let len_str = match len {
+                    Some(e) => self.expr_text_static(e),
+                    None => "...".to_string(),
+                };
+                return Ok(format!(
+                    "[{}]{}({})",
+                    len_str,
+                    self.type_text(elem),
+                    parts.join(", ")
+                ));
+            }
+        }
 
         // --- everything else: callee(args...) ---
         // An addressable argument auto-addresses at a pointer param (Batch
@@ -784,6 +826,18 @@ impl Emitter {
                 ..
             } if items.is_empty() => {
                 format!("[]{}", self.type_text(t))
+            }
+            Expr::ArrayLit {
+                len,
+                elem,
+                items,
+                ..
+            } if items.is_empty() => {
+                let len_str = match len {
+                    Some(e) => self.expr_text_static(e),
+                    None => "...".to_string(),
+                };
+                format!("[{}]{}", len_str, self.type_text(elem))
             }
             Expr::MapLit {
                 key,

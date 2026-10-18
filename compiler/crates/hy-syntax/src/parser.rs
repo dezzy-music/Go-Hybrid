@@ -1887,7 +1887,8 @@ impl Parser {
     }
 
     /// Operand-start `[`: `[]T{…}` typed slice literal, `[]T` type-as-value
-    /// (make argument), or `[a, b, c]` untyped composite literal.
+    /// (make argument), `[N]T{…}` typed array literal, `[...]T{…}` typed
+    /// array literal with inferred size, or `[a, b, c]` untyped composite literal.
     fn parse_bracket_literal(&mut self, start: usize) -> PResult<Expr> {
         self.bump(); // [
         if self.eat_punct("]") {
@@ -1916,21 +1917,92 @@ impl Parser {
                     span: self.span_from(start),
                 })
             }
-        } else {
-            let mut items = Vec::new();
-            while !self.at_punct("]") && !self.at_eof() {
-                items.push(self.parse_expr(true)?);
-                if !self.at_punct(",") && !self.at_punct("]") {
-                    return self.err("expected ',' or ']' in composite literal");
-                }
-                self.eat_punct(",");
-            }
+        } else if self.eat_punct("...") {
             self.expect_punct("]")?;
-            Ok(Expr::SliceLit {
-                elem: None,
-                items,
-                span: self.span_from(start),
-            })
+            let elem = Box::new(self.parse_type()?);
+            if self.at_punct("{") {
+                self.bump();
+                let mut items = Vec::new();
+                while !self.at_punct("}") && !self.at_eof() {
+                    items.push(self.parse_expr(true)?);
+                    if !self.at_punct(",") && !self.at_punct("}") {
+                        return self.err("expected ',' or '}' in array literal");
+                    }
+                    self.eat_punct(",");
+                }
+                self.expect_punct("}")?;
+                Ok(Expr::ArrayLit {
+                    len: None,
+                    elem,
+                    items,
+                    span: self.span_from(start),
+                })
+            } else {
+                self.err("`[...]T` array literal requires `{...}`")
+            }
+        } else {
+            let first = self.parse_expr(true)?;
+            if self.eat_punct(",") {
+                // Untyped list literal `[first, ...]` with 2+ items or trailing comma
+                let mut items = vec![first];
+                while !self.at_punct("]") && !self.at_eof() {
+                    items.push(self.parse_expr(true)?);
+                    if !self.at_punct(",") && !self.at_punct("]") {
+                        return self.err("expected ',' or ']' in composite literal");
+                    }
+                    self.eat_punct(",");
+                }
+                self.expect_punct("]")?;
+                Ok(Expr::SliceLit {
+                    elem: None,
+                    items,
+                    span: self.span_from(start),
+                })
+            } else {
+                self.expect_punct("]")?;
+                // We have `[ first ]`. Check if followed on the same line by a type expression.
+                if self.same_line_as_prev() && self.is_type_start() {
+                    let saved_pos = self.pos;
+                    let saved_diags = self.diags.len();
+                    if let Ok(elem) = self.parse_type() {
+                        if self.at_punct("{") {
+                            self.bump();
+                            let mut items = Vec::new();
+                            while !self.at_punct("}") && !self.at_eof() {
+                                items.push(self.parse_expr(true)?);
+                                if !self.at_punct(",") && !self.at_punct("}") {
+                                    return self.err("expected ',' or '}' in array literal");
+                                }
+                                self.eat_punct(",");
+                            }
+                            self.expect_punct("}")?;
+                            return Ok(Expr::ArrayLit {
+                                len: Some(Box::new(first)),
+                                elem: Box::new(elem),
+                                items,
+                                span: self.span_from(start),
+                            });
+                        } else {
+                            // `[3]int` type-as-value (e.g. `new([3]int)`)
+                            return Ok(Expr::ArrayLit {
+                                len: Some(Box::new(first)),
+                                elem: Box::new(elem),
+                                items: Vec::new(),
+                                span: self.span_from(start),
+                            });
+                        }
+                    } else {
+                        // Failed to parse type; backtrack and treat `[first]` as 1-element list literal
+                        self.pos = saved_pos;
+                        self.diags.truncate(saved_diags);
+                    }
+                }
+                Ok(Expr::SliceLit {
+                    elem: None,
+                    items: vec![first],
+                    span: self.span_from(start),
+                })
+            }
         }
     }
 
@@ -3930,4 +4002,27 @@ fn main() {
         );
     }
 
+    #[test]
+    fn array_composite_literals_parse_per_spec_t6_issue_643() {
+        // Issue #643: `[N]T{…}` and `[...]T{…}` array composite literals
+        let f = parse_src("fn main() {\n    a := [3]int{1, 2, 3}\n    b := [3]int{}\n    c := [...]int{1, 2}\n    d := [3]\n}");
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 4, "expected 4 statements (no split statement)");
+
+        // a := [3]int{1, 2, 3}
+        let Stmt::Local(l0) = &body.stmts[0] else { panic!("local") };
+        assert!(matches!(&l0.values[0], Expr::ArrayLit { len: Some(_), items, .. } if items.len() == 3));
+
+        // b := [3]int{} (Face A: must not split into []int{3} and int{})
+        let Stmt::Local(l1) = &body.stmts[1] else { panic!("local") };
+        assert!(matches!(&l1.values[0], Expr::ArrayLit { len: Some(_), items, .. } if items.is_empty()));
+
+        // c := [...]int{1, 2}
+        let Stmt::Local(l2) = &body.stmts[2] else { panic!("local") };
+        assert!(matches!(&l2.values[0], Expr::ArrayLit { len: None, items, .. } if items.len() == 2));
+
+        // d := [3] (untyped 1-element list literal preserved)
+        let Stmt::Local(l3) = &body.stmts[3] else { panic!("local") };
+        assert!(matches!(&l3.values[0], Expr::SliceLit { elem: None, items, .. } if items.len() == 1));
+    }
 }

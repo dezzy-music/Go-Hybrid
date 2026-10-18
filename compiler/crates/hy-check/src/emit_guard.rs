@@ -386,6 +386,24 @@ impl<'a> Checker<'a> {
                     self.check_expr_emit_guard(st, i);
                 }
             }
+            Expr::ArrayLit {
+                len,
+                elem,
+                items,
+                ..
+            } => {
+                if let Some(l) = len {
+                    self.check_expr_emit_guard(st, l);
+                }
+                self.check_type_expr_with_state(Some(st), elem);
+                let elem_ty = *elem.clone();
+                for i in items {
+                    self.check_const_overflow_init("array literal element", &elem_ty, i, None);
+                }
+                for i in items {
+                    self.check_expr_emit_guard(st, i);
+                }
+            }
             Expr::MapLit {
                 key,
                 value,
@@ -1521,7 +1539,7 @@ impl<'a> Checker<'a> {
                     Self::scan_expr_for_local_const(&f.value, name, use_pos, found);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for i in items {
                     Self::scan_expr_for_local_const(i, name, use_pos, found);
                 }

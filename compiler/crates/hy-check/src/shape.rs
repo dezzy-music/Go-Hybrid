@@ -285,6 +285,7 @@ impl<'a> Checker<'a> {
                     .map(|i| self.shape_of_expr(st, i))
                     .unwrap_or(TypeShape::Unknown),
             })),
+            Expr::ArrayLit { elem, .. } => TypeShape::Array(Box::new(self.shape_of_type(elem))),
             // closures are unsendable values in Tier 0 (the A5 perimeter);
             // classify_value rejects FnLit literals before shape lookup —
             // this arm covers fn-typed bindings and fn-typed fields
@@ -460,6 +461,9 @@ impl<'a> Checker<'a> {
             // nothing; a reference element (`[]map[...]`) does.
             Expr::SliceLit { elem: Some(t), .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
+            }
+            Expr::ArrayLit { elem, .. } => {
+                TypeShape::Array(Box::new(self.shape_of_type(elem)))
             }
             // `make(map[K]V{})` — shape key AND value: an erasure to
             // Map(Unknown, Unknown) let containers holding closures (or

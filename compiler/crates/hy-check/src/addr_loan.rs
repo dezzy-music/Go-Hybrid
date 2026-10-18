@@ -280,7 +280,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_addr_of_loan_projections(st, &f.value, include_direct_ident);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
                 for i in items {
                     self.check_expr_addr_of_loan_projections(st, i, include_direct_ident);
                 }

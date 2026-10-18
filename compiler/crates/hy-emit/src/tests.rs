@@ -2529,3 +2529,30 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn array_composite_literals_emit_correctly_issue_643() {
+    let go = emit(
+        "fn main() {\n    a := [3]int{1, 2, 3}\n    b := [3]int{}\n    c := [...]int{4, 5}\n}\n",
+    );
+    assert!(
+        go.contains("a := [3]int{1, 2, 3}"),
+        "expected a := [3]int{{1, 2, 3}}, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("b := [3]int{}"),
+        "expected b := [3]int{{}} (Face A fix), got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\n\tint{}\n") && !go.contains("[]int{3}"),
+        "Face A must not emit split statements []int{{3}} and int{{}}, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("c := [...]int{4, 5}"),
+        "expected c := [...]int{{4, 5}}, got:\n{}",
+        go
+    );
+}

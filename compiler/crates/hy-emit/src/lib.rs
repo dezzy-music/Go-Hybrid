@@ -716,7 +716,10 @@ impl Emitter {
         // immutability contract is the checker's business, not Go's.
         let composite = matches!(
             &c.value,
-            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+            Expr::SliceLit { .. }
+                | Expr::ArrayLit { .. }
+                | Expr::MapLit { .. }
+                | Expr::StructLit { .. }
         );
         let kw = if composite { "var" } else { "const" };
         match &c.ty {
@@ -1224,7 +1227,9 @@ impl Emitter {
                 self.expr_has_try(callee) || args.iter().any(|a| self.expr_has_try(&a.value))
             }
             Expr::StructLit { fields, .. } => fields.iter().any(|f| self.expr_has_try(&f.value)),
-            Expr::SliceLit { items, .. } => items.iter().any(|i| self.expr_has_try(i)),
+            Expr::SliceLit { items, .. } | Expr::ArrayLit { items, .. } => {
+                items.iter().any(|i| self.expr_has_try(i))
+            }
             Expr::MapLit { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v)),
