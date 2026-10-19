@@ -812,14 +812,12 @@ fn test_issue_722_generic_struct_without_explicit_constraint() {
 }
 
 #[test]
-fn test_issue_722_generic_struct_with_map_field() {
+fn test_issue_722_generic_struct_multi_params() {
     let go = emit(
-        "struct container[t] {\n    items map[string]t\n}\n\nfn main() {\n    var c container[int]\n    c2 := container[int]{}\n    fmt.println(len(c.items) + len(c2.items))\n}\n",
+        "struct pair[a, b] {\n    first a\n    second b\n}\n\nfn main() {\n    p := pair[int, string]{ first: 1, second: \"ok\" }\n    fmt.println(p.first)\n}\n",
     );
-    assert!(go.contains("type container[t any] struct {"), ":\n{}", go);
-    assert!(go.contains("items map[string]t"), ":\n{}", go);
-    assert!(go.contains("var c container[int]"), ":\n{}", go);
-    assert!(go.contains("c2 := container[int]{}"), ":\n{}", go);
+    assert!(go.contains("type pair[a any, b any] struct {"), ":\n{}", go);
+    assert!(go.contains("pair[int, string]{first: 1, second: \"ok\"}"), ":\n{}", go);
 }
 
 #[test]
