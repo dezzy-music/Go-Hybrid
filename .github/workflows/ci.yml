@@ -33,6 +33,7 @@ jobs:
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_job_cli.py -v
+          python3 -m unittest discover -s tools -p test_job_shell_args.py -v
           python3 -m unittest discover -s tools -p test_managed_gate.py -v
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
           python3 -m unittest discover -s tools -p test_differential_output.py -v
@@ -145,7 +146,8 @@ jobs:
           set -e
           cd compiler
           cargo test --workspace --quiet
-      - name: Checker corpus verdict agreement (80/80 + tripwire)
+
+      - name: Checker corpus verdict agreement (113/113 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet

@@ -18,13 +18,37 @@
 //! walk stays shallow (`deep = false`) and closure bodies are recursed
 //! exactly once via `Expr::FnLit`.
 
-use crate::const_overflow::{const_float_value, const_int_value};
+use crate::const_overflow::{const_float_value, const_int_value, parse_int_lit, ConstInt};
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, Place, PlaceKind, SelectArmKind,
-    Stmt, TypeExpr,
+    AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, LitKind, Place, PlaceKind,
+    SelectArmKind, Stmt, TypeExpr, UnOp,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ConstKeyVal {
+    Int(i128),
+    Str(String),
+    Bool(bool),
+    Float(u64),
+    Nil,
+}
+
+impl ConstKeyVal {
+    pub(crate) fn render(&self) -> String {
+        match self {
+            ConstKeyVal::Int(v) => format!("{v}"),
+            ConstKeyVal::Str(s) => format!("\"{s}\""),
+            ConstKeyVal::Bool(b) => format!("{b}"),
+            ConstKeyVal::Float(bits) => {
+                let f = f64::from_bits(*bits);
+                format!("{f}")
+            }
+            ConstKeyVal::Nil => "nil".to_string(),
+        }
+    }
+}
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: mirror `arith::check_stmt_const_zero_divisor`.
@@ -156,6 +180,7 @@ impl<'a> Checker<'a> {
                                 None,
                                 false,
                                 false,
+                                false,
                             );
                         }
                     }
@@ -164,7 +189,7 @@ impl<'a> Checker<'a> {
                         if deep {
                             let shapes = self.iterate_var_shapes(st, expr, vars.len());
                             for (name, shape) in vars.iter().zip(shapes) {
-                                self.define_binding(st, name, shape, None, false, false);
+                                self.define_binding(st, name, shape, None, false, false, false);
                             }
                         }
                     }
@@ -271,7 +296,7 @@ impl<'a> Checker<'a> {
                                     } else {
                                         TypeShape::Primitive
                                     };
-                                    self.define_binding(st, n, shape, None, false, false);
+                                    self.define_binding(st, n, shape, None, false, false, false);
                                 }
                             }
                         }
@@ -290,6 +315,7 @@ impl<'a> Checker<'a> {
 
     fn bind_closure_local_for_emit_guard(&self, st: &mut FnState, l: &hy_syntax::LocalDecl) {
         let immutable = matches!(l.kind, hy_syntax::LocalKind::Const);
+        let is_let = matches!(l.kind, hy_syntax::LocalKind::Let);
         if l.values.is_empty() {
             let shape = l
                 .ty
@@ -298,7 +324,7 @@ impl<'a> Checker<'a> {
                 .unwrap_or(TypeShape::Unknown);
             let ty = l.ty.clone();
             for name in &l.names {
-                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false);
+                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false, is_let);
             }
         } else if l.names.len() == l.values.len() {
             for (name, val) in l.names.iter().zip(l.values.iter()) {
@@ -308,7 +334,7 @@ impl<'a> Checker<'a> {
                     (_, s) => s,
                 };
                 let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
-                self.define_binding(st, name, shape, ty, immutable, false);
+                self.define_binding(st, name, shape, ty, immutable, false, is_let);
             }
         }
     }
@@ -319,6 +345,13 @@ impl<'a> Checker<'a> {
             PlaceKind::Index { base, index } => {
                 self.check_place_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
+                if let Some(base_ty) = self.place_target_ty(st, base) {
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        let key_ty = self.resolve_type_alias(&key);
+                        self.check_const_overflow_init("map index", &key_ty, index, Some(st));
+                    }
+                }
             }
             PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
                 self.check_place_emit_guard(st, base)
@@ -336,6 +369,7 @@ impl<'a> Checker<'a> {
                     BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
                     _ => {}
                 }
+                self.check_binary_const_overflow(st, *op, lhs, rhs);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
@@ -347,6 +381,13 @@ impl<'a> Checker<'a> {
             Expr::Index { base, index, .. } => {
                 self.check_expr_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    let resolved = self.resolve_type_alias(&base_ty);
+                    if let TypeExpr::Map { key, .. } = resolved {
+                        let key_ty = self.resolve_type_alias(&key);
+                        self.check_const_overflow_init("map index", &key_ty, index, Some(st));
+                    }
+                }
             }
             Expr::Slice { base, lo, hi, .. } => {
                 self.check_expr_emit_guard(st, base);
@@ -438,6 +479,7 @@ impl<'a> Checker<'a> {
                 self.check_type_expr_with_state(Some(st), value);
                 let key_ty = *key.clone();
                 let val_ty = *value.clone();
+                self.check_map_literal_duplicate_keys(entries, Some(st));
                 for (k, v) in entries {
                     self.check_const_overflow_init("map literal key", &key_ty, k, None);
                     self.check_const_overflow_init("map literal value", &val_ty, v, None);
@@ -473,7 +515,7 @@ impl<'a> Checker<'a> {
                 cst.scope_push();
                 for p in params {
                     let shape = self.shape_of_type(&p.ty);
-                    self.define_binding(&mut cst, &p.name, shape, Some(p.ty.clone()), false, false);
+                    self.define_binding(&mut cst, &p.name, shape, Some(p.ty.clone()), false, false, false);
                 }
                 for r in results {
                     if let Some(name) = &r.name {
@@ -484,6 +526,7 @@ impl<'a> Checker<'a> {
                                 name,
                                 shape,
                                 Some(r.ty.clone()),
+                                false,
                                 false,
                                 false,
                             );
@@ -504,7 +547,7 @@ impl<'a> Checker<'a> {
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
 
-        // 1. Built-in: append(slice, items...)
+        // 1. Built-in: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {
             if name == "append" {
                 if let Some(first_arg) = args.first() {
@@ -518,8 +561,26 @@ impl<'a> Checker<'a> {
                     if let Some(elem_ty) = elem_ty {
                         for a in &args[1..] {
                             if !a.spread {
-                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, None);
+                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, Some(st));
                             }
+                        }
+                    }
+                }
+                return;
+            }
+            if name == "delete" {
+                if let Some(first_arg) = args.first() {
+                    if let Some(key_arg) = args.get(1) {
+                        let key_ty = self
+                            .ty_of_expr(st, &first_arg.value)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| match t {
+                                TypeExpr::Map { key, .. } => Some(*key),
+                                _ => None,
+                            });
+                        if let Some(key_ty) = key_ty {
+                            let resolved_key = self.resolve_type_alias(&key_ty);
+                            self.check_const_overflow_init("argument to delete", &resolved_key, &key_arg.value, Some(st));
                         }
                     }
                 }
@@ -1265,7 +1326,7 @@ impl<'a> Checker<'a> {
         self.const_int_value_at(&d.value, d.span.start, depth + 1)
     }
 
-    fn const_int_value_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
+    pub(crate) fn const_int_value_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
         if depth > 32 {
             return None;
         }
@@ -1346,7 +1407,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn const_string_len_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
+    pub(crate) fn const_string_len_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
         if depth > 32 {
             return None;
         }
@@ -1761,6 +1822,306 @@ impl<'a> Checker<'a> {
     fn stmt_ends_before(stmt: &Stmt, pos: hy_diag::Pos) -> bool {
         let s = Self::stmt_span(stmt);
         (s.end.line, s.end.col) <= (pos.line, pos.col)
+    }
+
+    fn check_binary_const_overflow(&mut self, st: &FnState, op: BinOp, lhs: &Expr, rhs: &Expr) {
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            return;
+        }
+
+        let desc = match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "comparison",
+            _ => "binary expression",
+        };
+
+        if let Some(lhs_ty) = self.ty_of_expr(st, lhs) {
+            let resolved = self.resolve_type_alias(&lhs_ty);
+            self.check_const_overflow_init(desc, &resolved, rhs, Some(st));
+        }
+
+        if let Some(rhs_ty) = self.ty_of_expr(st, rhs) {
+            let resolved = self.resolve_type_alias(&rhs_ty);
+            self.check_const_overflow_init(desc, &resolved, lhs, Some(st));
+        }
+    }
+
+    pub(crate) fn check_file_map_literal_duplicate_keys(&mut self) {
+        for d in &self.file.decls {
+            if let hy_syntax::Decl::Const(c) = d {
+                self.check_expr_map_duplicate_keys_in_decl(&c.value);
+            }
+        }
+    }
+
+    pub(crate) fn check_expr_map_duplicate_keys_in_decl(&mut self, expr: &Expr) {
+        match expr {
+            Expr::MapLit { entries, .. } => {
+                self.check_map_literal_duplicate_keys(entries, None);
+                for (k, v) in entries {
+                    self.check_expr_map_duplicate_keys_in_decl(k);
+                    self.check_expr_map_duplicate_keys_in_decl(v);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for i in items {
+                    self.check_expr_map_duplicate_keys_in_decl(i);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_expr_map_duplicate_keys_in_decl(&f.value);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.check_expr_map_duplicate_keys_in_decl(lhs);
+                self.check_expr_map_duplicate_keys_in_decl(rhs);
+            }
+            Expr::Unary { operand, .. } => {
+                self.check_expr_map_duplicate_keys_in_decl(operand);
+            }
+            Expr::Paren { inner, .. } => {
+                self.check_expr_map_duplicate_keys_in_decl(inner);
+            }
+            Expr::Call { callee, args, .. } => {
+                self.check_expr_map_duplicate_keys_in_decl(callee);
+                for a in args {
+                    self.check_expr_map_duplicate_keys_in_decl(&a.value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn check_map_literal_duplicate_keys(
+        &mut self,
+        entries: &[(Expr, Expr)],
+        st: Option<&FnState>,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        for (k, _) in entries {
+            if let Some(key_val) = self.fold_const_key(k, st, 0) {
+                if !seen.insert(key_val.clone()) {
+                    let key_repr = key_val.render();
+                    let msg = format!("duplicate key `{}` in map literal (HYB-E1002)", key_repr);
+                    let notes = vec![
+                        format!(
+                            "why: Go rejects duplicate constant keys in map literals (`duplicate key {} in map literal`), so an accepted Hybrid program would emit unbuildable Go (issue #687)",
+                            key_repr
+                        ),
+                        "fix: remove the duplicate key or ensure map literal keys are unique".to_string(),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E1002", self.path.clone(), k.span(), msg)
+                            .with_notes(notes),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn fold_const_key(
+        &self,
+        expr: &Expr,
+        st: Option<&FnState>,
+        depth: usize,
+    ) -> Option<ConstKeyVal> {
+        if depth > 16 {
+            return None;
+        }
+        match unwrap_parens(expr) {
+            Expr::Lit { kind, .. } => match kind {
+                LitKind::Int(s) => match parse_int_lit(s) {
+                    Some(ConstInt::Value(v)) => Some(ConstKeyVal::Int(v)),
+                    _ => None,
+                },
+                LitKind::Char(c) => Some(ConstKeyVal::Int(*c as i128)),
+                LitKind::Str(s) | LitKind::RawStr(s) => Some(ConstKeyVal::Str(s.clone())),
+                LitKind::Bool(b) => Some(ConstKeyVal::Bool(*b)),
+                LitKind::Float(s) => {
+                    s.replace('_', "").parse::<f64>().ok().map(|f| ConstKeyVal::Float(f.to_bits()))
+                }
+                LitKind::Nil => Some(ConstKeyVal::Nil),
+            },
+            Expr::Ident { name, span } => {
+                if name == "nil" {
+                    return Some(ConstKeyVal::Nil);
+                }
+                if name == "true" {
+                    return Some(ConstKeyVal::Bool(true));
+                }
+                if name == "false" {
+                    return Some(ConstKeyVal::Bool(false));
+                }
+                if let Some((_, val, _)) = self.resolve_local_const_decl_at(name, span.start) {
+                    return self.fold_const_key(val, st, depth + 1);
+                }
+                if let Some(st) = st {
+                    if st.env_lookup(name).is_some() {
+                        return None;
+                    }
+                }
+                if let Some(val) = self.const_values.get(name) {
+                    return self.fold_const_key(val, st, depth + 1);
+                }
+                None
+            }
+            Expr::Unary { op, operand, .. } => {
+                let v = self.fold_const_key(operand, st, depth + 1)?;
+                match op {
+                    UnOp::Neg => match v {
+                        ConstKeyVal::Int(i) => i.checked_neg().map(ConstKeyVal::Int),
+                        ConstKeyVal::Float(bits) => {
+                            let f = -f64::from_bits(bits);
+                            Some(ConstKeyVal::Float(f.to_bits()))
+                        }
+                        _ => None,
+                    },
+                    UnOp::Not => match v {
+                        ConstKeyVal::Bool(b) => Some(ConstKeyVal::Bool(!b)),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.fold_const_key(lhs, st, depth + 1)?;
+                let r = self.fold_const_key(rhs, st, depth + 1)?;
+                match op {
+                    BinOp::Add => match (l, r) {
+                        (ConstKeyVal::Str(a), ConstKeyVal::Str(b)) => {
+                            Some(ConstKeyVal::Str(format!("{a}{b}")))
+                        }
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            a.checked_add(b).map(ConstKeyVal::Int)
+                        }
+                        _ => None,
+                    },
+                    BinOp::Sub => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            a.checked_sub(b).map(ConstKeyVal::Int)
+                        }
+                        _ => None,
+                    },
+                    BinOp::Mul => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            a.checked_mul(b).map(ConstKeyVal::Int)
+                        }
+                        _ => None,
+                    },
+                    BinOp::Div => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            if b == 0 {
+                                None
+                            } else {
+                                a.checked_div(b).map(ConstKeyVal::Int)
+                            }
+                        }
+                        _ => None,
+                    },
+                    BinOp::Mod => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            if b == 0 {
+                                None
+                            } else {
+                                a.checked_rem(b).map(ConstKeyVal::Int)
+                            }
+                        }
+                        _ => None,
+                    },
+                    BinOp::Shl => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            if b < 0 || b > 127 {
+                                None
+                            } else {
+                                a.checked_shl(b as u32).map(ConstKeyVal::Int)
+                            }
+                        }
+                        _ => None,
+                    },
+                    BinOp::Shr => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            if b < 0 || b > 127 {
+                                None
+                            } else {
+                                a.checked_shr(b as u32).map(ConstKeyVal::Int)
+                            }
+                        }
+                        _ => None,
+                    },
+                    BinOp::BitAnd => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => Some(ConstKeyVal::Int(a & b)),
+                        _ => None,
+                    },
+                    BinOp::BitOr => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => Some(ConstKeyVal::Int(a | b)),
+                        _ => None,
+                    },
+                    BinOp::BitXor => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => Some(ConstKeyVal::Int(a ^ b)),
+                        _ => None,
+                    },
+                    BinOp::And => match (l, r) {
+                        (ConstKeyVal::Bool(a), ConstKeyVal::Bool(b)) => {
+                            Some(ConstKeyVal::Bool(a && b))
+                        }
+                        _ => None,
+                    },
+                    BinOp::Or => match (l, r) {
+                        (ConstKeyVal::Bool(a), ConstKeyVal::Bool(b)) => {
+                            Some(ConstKeyVal::Bool(a || b))
+                        }
+                        _ => None,
+                    },
+                    BinOp::Eq => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => Some(ConstKeyVal::Bool(a == b)),
+                        (ConstKeyVal::Str(a), ConstKeyVal::Str(b)) => Some(ConstKeyVal::Bool(a == b)),
+                        (ConstKeyVal::Bool(a), ConstKeyVal::Bool(b)) => Some(ConstKeyVal::Bool(a == b)),
+                        (ConstKeyVal::Float(a), ConstKeyVal::Float(b)) => Some(ConstKeyVal::Bool(a == b)),
+                        (ConstKeyVal::Nil, ConstKeyVal::Nil) => Some(ConstKeyVal::Bool(true)),
+                        _ => None,
+                    },
+                    BinOp::Ne => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => Some(ConstKeyVal::Bool(a != b)),
+                        (ConstKeyVal::Str(a), ConstKeyVal::Str(b)) => Some(ConstKeyVal::Bool(a != b)),
+                        (ConstKeyVal::Bool(a), ConstKeyVal::Bool(b)) => Some(ConstKeyVal::Bool(a != b)),
+                        (ConstKeyVal::Float(a), ConstKeyVal::Float(b)) => Some(ConstKeyVal::Bool(a != b)),
+                        (ConstKeyVal::Nil, ConstKeyVal::Nil) => Some(ConstKeyVal::Bool(false)),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if args.len() == 1 && !args[0].spread {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        let arg_val = self.fold_const_key(&args[0].value, st, depth + 1)?;
+                        match name.as_str() {
+                            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32"
+                            | "i64" | "int64" | "uint" | "u8" | "uint8" | "byte" | "u16"
+                            | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "rune"
+                            | "uintptr" => match arg_val {
+                                ConstKeyVal::Int(_) => Some(arg_val),
+                                _ => None,
+                            },
+                            "string" => match arg_val {
+                                ConstKeyVal::Str(_) => Some(arg_val),
+                                _ => None,
+                            },
+                            "bool" => match arg_val {
+                                ConstKeyVal::Bool(_) => Some(arg_val),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }
 

@@ -352,11 +352,30 @@ impl<'a> Checker<'a> {
                     // check-site. The pointee is inferred when the type argument
                     // resolves; otherwise Unknown — still a non-sendable pointer.
                     "new" => {
-                        let pointee = match args.first().map(|a| &a.value) {
-                            // `new(pool_stats)` — the argument is a type name,
-                            // not a value; name a declared struct precisely.
-                            Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
-                                TypeShape::Struct(Some(name.clone()))
+                        let pointee = match args
+                            .first()
+                            .map(|a| crate::model::unwrap_parens(&a.value))
+                        {
+                            // `new(pool_stats)` / `new((pool_stats))` / `new(alias)` — the
+                            // argument is a type name, not a value; resolve structs, type
+                            // aliases, primitives, and foreign types via `named_shape`.
+                            Some(Expr::Ident { name, .. }) => self.named_shape(name),
+                            Some(Expr::Field { base, name, .. }) => {
+                                if let Expr::Ident { name: pkg, .. } =
+                                    crate::model::unwrap_parens(base)
+                                {
+                                    self.named_shape(&format!("{}.{}", pkg, name))
+                                } else {
+                                    TypeShape::Unknown
+                                }
+                            }
+                            Some(Expr::Index { base, .. }) => {
+                                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base)
+                                {
+                                    self.named_shape(name)
+                                } else {
+                                    TypeShape::Unknown
+                                }
                             }
                             Some(other) => self.shape_of_expr(st, other),
                             None => TypeShape::Unknown,
@@ -459,7 +478,7 @@ impl<'a> Checker<'a> {
         let Some(first) = args.first() else {
             return TypeShape::Unknown;
         };
-        match &first.value {
+        match crate::model::unwrap_parens(&first.value) {
             // The parser renders a type in expression position as a literal
             // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
             // StructLit{ty: Chan}); other spellings degrade to Unknown.
@@ -479,6 +498,7 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
             ),
+            Expr::Ident { name, .. } => self.named_shape(name),
             _ => TypeShape::Unknown,
         }
     }
@@ -705,6 +725,17 @@ impl<'a> Checker<'a> {
                     if name == "make" {
                         return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
+                    if args.len() == 1 {
+                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
+                            || crate::const_init::is_conversion_type_name(name)
+                            || self.type_aliases.contains_key(name);
+                        if is_type_name && !self.fns.contains_key(name.as_str()) {
+                            return Some(TypeExpr::Named {
+                                name: name.clone(),
+                                span: *span,
+                            });
+                        }
+                    }
                     let head = Self::base_named_type_str(name);
                     self.fns
                         .get(name.as_str())
@@ -764,6 +795,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(
+                    op,
+                    hy_syntax::BinOp::Add
+                        | hy_syntax::BinOp::Sub
+                        | hy_syntax::BinOp::Mul
+                        | hy_syntax::BinOp::Div
+                        | hy_syntax::BinOp::Mod
+                        | hy_syntax::BinOp::BitAnd
+                        | hy_syntax::BinOp::BitOr
+                        | hy_syntax::BinOp::BitXor
+                ) {
+                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1050,7 +1098,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn call_result_tys(&self, st: &FnState, callee: &Expr) -> Option<Vec<TypeExpr>> {
+    pub(crate) fn call_result_tys(&self, st: &FnState, callee: &Expr) -> Option<Vec<TypeExpr>> {
         match crate::model::unwrap_parens(callee) {
             Expr::FnLit { results, .. } => Some(results.iter().map(|r| r.ty.clone()).collect()),
             Expr::Ident { name, .. } => {

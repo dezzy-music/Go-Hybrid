@@ -63,12 +63,21 @@ impl Emitter {
         expected: Option<&TypeExpr>,
     ) -> Result<String, EmitError> {
         if let Some(exp) = expected {
-            match e {
+            // `Paren` is semantically transparent: `({replicas: 2})` in a
+            // map-value or slice-elem slot still has to inherit the expected
+            // type's head, or the elided literal falls through to the
+            // "spell the type" refusal. Peeling here is safe — the parens are
+            // redundant in a Go element position and are dropped from output.
+            let mut lit = e;
+            while let Expr::Paren { inner, .. } = lit {
+                lit = inner;
+            }
+            match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
                     let head = self.type_text(exp);
-                    let body = self.field_inits(fields)?;
+                    let body = self.struct_lit_body(exp, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
                 }
                 Expr::SliceLit {
@@ -116,6 +125,11 @@ impl Emitter {
                     return Err(EmitError::unsupported(
                         "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
                     ));
+                }
+                let (head, type_args) = split_type_args(name);
+                if let Some(ta) = type_args {
+                    let translated = self.translate_type_args_suffix(ta);
+                    return Ok(format!("{}{}", head, translated));
                 }
                 Ok(name.clone())
             }
@@ -201,8 +215,13 @@ impl Emitter {
 
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
+                    if matches!(t, TypeExpr::Chan { .. }) {
+                        return Err(EmitError::unsupported(
+                            "channel type is not a value expression — construct a channel with `make(chan T)`",
+                        ));
+                    }
                     let head = self.type_text(t);
-                    let body = self.field_inits(fields)?;
+                    let body = self.struct_lit_body(t, fields)?;
                     Ok(format!("{}{{{}}}", head, body))
                 } else {
                     Err(EmitError::unsupported(
@@ -364,6 +383,7 @@ impl Emitter {
                 // an outer loop's count cannot bless a closure-nested label.
                 let saved_for_depth = self.for_depth;
                 self.for_depth = 0;
+                let saved_loop_labels = std::mem::take(&mut self.loop_labels);
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
                 out.push_str(") ");
@@ -386,8 +406,11 @@ impl Emitter {
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
                 let saved_loans = std::mem::take(&mut self.loan_frames);
+                let saved_inherit = self.branch_inherit.take();
                 let body_res = self.emit_block_body(&body.stmts);
+                self.branch_inherit = saved_inherit;
                 self.loan_frames = saved_loans;
+                self.loop_labels = saved_loop_labels;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
@@ -464,6 +487,27 @@ impl Emitter {
             }
         }
         Ok((format_str, args))
+    }
+
+    /// A struct literal's keyed fields plus, for a user struct, the N5
+    /// allocation of every map-carrying field the literal leaves at its
+    /// zero value (`bag{}` → `bag{counts: map[string]int{}}`, issue #645).
+    fn struct_lit_body(
+        &mut self,
+        ty: &TypeExpr,
+        fields: &[FieldInit],
+    ) -> Result<String, EmitError> {
+        let body = self.field_inits(fields)?;
+        let extra = self.n5_missing_fields(ty, fields);
+        if extra.is_empty() {
+            return Ok(body);
+        }
+        let mut parts = Vec::new();
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        parts.extend(extra);
+        Ok(parts.join(", "))
     }
 
     fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
@@ -623,6 +667,13 @@ impl Emitter {
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
         }
+        // --- new(T) whose zero value allocates maps (N5, issue #645) ---
+        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
+        if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
+            if let Some(alloc) = self.n5_new(args) {
+                return Ok(alloc);
+            }
+        }
 
         // --- package-qualified calls ---
         if let Expr::Field { base, name, .. } = callee {
@@ -699,6 +750,9 @@ impl Emitter {
                     let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
+                        let translated_ta = type_args
+                            .map(|ta| self.translate_type_args_suffix(ta))
+                            .unwrap_or_default();
                         let mut parts = Vec::new();
                         for a in args {
                             parts.push(self.emit_call_arg(a)?);
@@ -707,12 +761,23 @@ impl Emitter {
                             "{}_{}{}({})",
                             root,
                             head,
-                            type_args.unwrap_or_default(),
+                            translated_ta,
                             parts.join(", ")
                         ));
                     }
                 }
             }
+        }
+
+        let mut bare_callee = callee;
+        while let Expr::Paren { inner, .. } = bare_callee {
+            bare_callee = inner;
+        }
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
+            return self.emit_make(args);
+        }
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+            return self.emit_new(&args[0]);
         }
 
         // --- a SPEC primitive conversion: `u8(300)` -> `uint8(300)`.
@@ -784,7 +849,8 @@ impl Emitter {
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
         if let Expr::Ident { name, .. } = callee {
-            if let Some((_, _, _, params)) = self.fn_shapes.get(name.as_str()) {
+            let (fn_head, _) = split_type_args(name);
+            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
@@ -822,7 +888,11 @@ impl Emitter {
         let Some(first) = args.first() else {
             return Err(EmitError::unsupported("`make` with no type argument"));
         };
-        let ty_text = match &first.value {
+        let mut first_val = &first.value;
+        while let Expr::Paren { inner, .. } = first_val {
+            first_val = inner;
+        }
+        let ty_text = match first_val {
             Expr::StructLit {
                 ty: Some(t),
                 fields,
@@ -843,6 +913,7 @@ impl Emitter {
             } if entries.is_empty() => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
             }
+            Expr::Ident { name, .. } => name.clone(),
             other => {
                 return Err(EmitError::unsupported(format!(
                     "`make` first argument must be a type; got value `{}`",
@@ -855,6 +926,36 @@ impl Emitter {
             parts.push(self.emit_call_arg(a)?);
         }
         Ok(format!("make({})", parts.join(", ")))
+    }
+
+    fn emit_new(&mut self, arg: &CallArg) -> Result<String, EmitError> {
+        let mut val = &arg.value;
+        while let Expr::Paren { inner, .. } = val {
+            val = inner;
+        }
+        let ty_text = match val {
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => self.type_text(t),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() => format!("[]{}", self.type_text(t)),
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
+            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
+                .unwrap_or(name.as_str())
+                .to_string(),
+            other => self.emit_expr(other, 0)?,
+        };
+        Ok(format!("new({})", ty_text))
     }
 
     /// The rust-crate call lowering (M6): `sha3.digest256(w)` →
@@ -974,7 +1075,9 @@ impl Emitter {
             return Err(EmitError::unbound_crate(pkg));
         }
 
-        self.use_package(pkg);
+        if pkg != "errors" || name != "wrap" {
+            self.use_package(pkg);
+        }
 
         // --- conversion targets (Batch E): `http.handler(fn(w, r) { … })`
         //     → `http.HandlerFunc(func(w http.ResponseWriter, r *http.
@@ -1049,6 +1152,24 @@ impl Emitter {
                     }
                     let n = self.emit_call_arg(&args[0])?;
                     Ok(format!("time.Duration({}) * time.{}", n, unit))
+                }
+                MemberSpecial::ErrorsWrap => {
+                    self.use_package("fmt");
+                    if args.len() != 2 {
+                        return Err(EmitError::unsupported(
+                            "errors.wrap takes exactly two arguments (err, msg)",
+                        ));
+                    }
+                    let (err_arg, msg_arg) = if args[0].name.as_deref() == Some("msg")
+                        || args[1].name.as_deref() == Some("err")
+                    {
+                        (&args[1], &args[0])
+                    } else {
+                        (&args[0], &args[1])
+                    };
+                    let err = self.emit_call_arg(err_arg)?;
+                    let msg = self.emit_call_arg(msg_arg)?;
+                    Ok(format!("fmt.Errorf(\"%s: %w\", {}, {})", msg, err))
                 }
             };
         }

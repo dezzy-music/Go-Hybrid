@@ -57,7 +57,8 @@ def gh_api(path, data=None, method=None):
     tok = gh_token()
     req = urllib.request.Request(GITHUB_API + path)
     if tok:
-        req.add_header("Authorization", "token " + tok)
+        # Credentials belong to the initial API request, not its redirects.
+        req.add_unredirected_header("Authorization", "token " + tok)
     req.add_header("Accept", "application/vnd.github+json")
     if data is not None:
         req.add_header("Content-Type", "application/json")
@@ -114,7 +115,7 @@ def kaggle_submit(jobdir):
             f.write(injected.encode("utf-8"))
         with open(sidecar, "w", encoding="utf-8") as f:  # per SPEC §2 protocol
             f.write(payload)
-        rc, out = sh("{} kernels push -p {}".format(KAGGLE_CLI, WORKER_DIR), timeout=180)
+        rc, out = sh("{} kernels push -p {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(WORKER_DIR)), timeout=180)
         print(out)
         if rc != 0:
             sys.exit("kaggle kernels push failed")
@@ -137,7 +138,7 @@ def kaggle_submit(jobdir):
 
 def kaggle_status(slug=None):
     slug = slug or kaggle_slug()
-    rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+    rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
     print(out)
     return out
 
@@ -162,7 +163,7 @@ def kaggle_wait(minutes, slug=None):
     saw_active = False
     state, polls = "?", 0
     while time.time() < deadline:
-        rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+        rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
         polls += 1
         try:
             state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
@@ -339,7 +340,9 @@ def actions_fetch(run_id, jobdir):
         url = a["archive_download_url"]
         dest = os.path.join(jobdir, "result", a["name"] + ".zip")
         req = urllib.request.Request(url)
-        req.add_header("Authorization", "token " + tok)
+        # GitHub redirects archive downloads to a signed storage URL. urllib
+        # forwards normal headers across hosts; do not send our token there.
+        req.add_unredirected_header("Authorization", "token " + tok)
         # Finish the response before touching a previous valid archive. Publish
         # via a sibling temporary file so write/replace failures preserve it too.
         with urllib.request.urlopen(req, timeout=120) as r:

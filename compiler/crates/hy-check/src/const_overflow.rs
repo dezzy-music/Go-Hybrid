@@ -903,7 +903,10 @@ impl<'a> Checker<'a> {
         self.diags
             .push(Diagnostic::error("HYB-E6006", self.path.clone(), span, msg).with_notes(notes));
     }
+
+
 }
+
 
 /// A literal-constant conversion operand (the literal-only scope shared with
 /// E6001/E6002). Anything else — idents, binary ops, calls — is out of
@@ -1081,7 +1084,7 @@ pub(crate) fn target_uint_range() -> (i128, i128) {
 /// name (SPEC-LANGUAGE §11 / Go's typed-constant assignment rule).
 /// Platform-word `int`/`uint`/`isize`/`usize` use the 64-bit LP64 ranges
 /// the emitter targets (SPEC B9 / X7).
-fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
+pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
     Some(match name {
         "i8" | "int8" => (i8::MIN as i128, i8::MAX as i128),
         "u8" | "uint8" | "byte" => (0, u8::MAX as i128),
@@ -1100,7 +1103,7 @@ fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
 /// Parsed integer literal, retaining the fact that a syntactically valid
 /// value exceeded i128 instead of treating it as non-constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConstInt {
+pub(crate) enum ConstInt {
     Value(i128),
     PosOverflow,
     NegOverflow,
@@ -1425,7 +1428,7 @@ fn integer_of_float(f: f64) -> String {
     format!("{}", f.trunc() as i128)
 }
 
-fn parse_int_lit(s: &str) -> Option<ConstInt> {
+pub(crate) fn parse_int_lit(s: &str) -> Option<ConstInt> {
     let clean: String = s.chars().filter(|c| *c != '_').collect();
     if clean.is_empty() {
         return None;
