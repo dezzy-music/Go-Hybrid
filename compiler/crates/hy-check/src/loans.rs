@@ -1238,6 +1238,7 @@ impl<'a> Checker<'a> {
                                     moved: None,
                                     non_owned_origin: None,
                                     slot_loan: false,
+                                    is_let: false,
                                 },
                             );
                             if matches!(sh, TypeShape::Closure) {
@@ -7451,10 +7452,17 @@ impl<'a> Checker<'a> {
                         (false, true)
                     } else if let Some((params, _, body)) = self.resolve_call_expr_decl_or_fnlit(st, callee) {
                         match params.get(i) {
-                            Some((pn, _)) => {
+                            Some((pn, pty)) => {
+                                let is_ptr = pty
+                                    .as_ref()
+                                    .map(|t| {
+                                        matches!(t, hy_syntax::TypeExpr::Pointer { .. })
+                                            || matches!(self.shape_of_type(t), TypeShape::Pointer(_))
+                                    })
+                                    .unwrap_or(false);
                                 let mut aliases = HashSet::new();
                                 aliases.insert(pn.clone());
-                                (false, self.block_mutates_const_param(&body, &mut aliases, 0))
+                                (is_ptr, self.block_mutates_const_param(&body, &mut aliases, 0))
                             }
                             None => (false, true),
                         }
@@ -7545,10 +7553,17 @@ impl<'a> Checker<'a> {
                 _ => {
                     if let Some((params, _, body)) = self.resolve_call_expr_decl_or_fnlit(st, callee) {
                         match params.get(i) {
-                            Some((pn, _)) => {
+                            Some((pn, pty)) => {
+                                let is_ptr = pty
+                                    .as_ref()
+                                    .map(|t| {
+                                        matches!(t, hy_syntax::TypeExpr::Pointer { .. })
+                                            || matches!(self.shape_of_type(t), TypeShape::Pointer(_))
+                                    })
+                                    .unwrap_or(false);
                                 let mut aliases = HashSet::new();
                                 aliases.insert(pn.clone());
-                                (false, self.block_mutates_const_param(&body, &mut aliases, 0))
+                                (is_ptr, self.block_mutates_const_param(&body, &mut aliases, 0))
                             }
                             None => (false, true),
                         }
